@@ -1,0 +1,4 @@
+[submodule "ctsm_USGS_irrigation"]
+	path = ctsm_USGS_irrigation
+	url = https://github.com/amansnama/CTSM.git
+	branch = USGS_irrig_ratio

@@ -1,0 +1,199 @@
+# Created on 2025/05/13 by Aman Shrestha
+===================================================
+README on implementing USGS surface water - groundwater ratio in clm
+===================================================
+Planned implementation algorithm:
+
+Needs a namelist flag to switch to using USGS GW ratio.
+Need to read GW ratio. (check Farshid's implementation) - DONE(changes in initVerticalMod, ColumnType, GridcellType)
+
+USGS_ratio = USGS dataset for GW ratio to total irrigation
+QIR_sfc = QIRRIG_FROM_SURFACE
+QIR_gw = QIRRIG_FROM_GW_UNCONFINED + QIRRIG_FROM_GW_CONFINED
+QIR_total = QIR_sfc + QIR_gw
+CLM_GW_ratio = QIR_gw / QIR_total
+
+Need check for what to do if either USGS_ratio or CLM_GW_ratio is zero, but not together.
+
+if CLM_GW_ratio > USGS_ratio:
+  more GW is being used. GW supply is unlimited.
+  Action:
+    Reduce GW, increase SW.
+      Scale QIR_gw = USGS_ratio * QIR_total
+      Scale QIR_sw = QIR_total - QIR_gw
+        Need to apply check of river threshold for QIR_sw
+          if scaled QIR_sw > threshold:
+            raise warning
+            QIR_sw = threshold
+            QIR_gw = QIR_total - QIR_gw
+              In this case, USGS_ratio will not be followed.
+              Might need to create an output variable to show which grids are not following USGS_ratio.
+          else: Do nothing
+
+elseif CLM_GW_ratio < USGS_ratio:
+  more SW is being used than observed.
+  Action:
+    Increase GW, decrease SW.
+      Scale QIR_gw = USGS_ratio * QIR_total
+      Scale QIR_sw = QIR_total - QIR_gw
+      No check needed because QIR_sw should be lower.
+      Still do a sanity check for scaled QIR_sw <= QIR_sw
+
+else: # CLM_GW_ratio == USGS_ratio
+  Do nothing
+
+===================================================
+2025/05/13
+===================================================
+Reading USGS_GW_ratio
+FFelfelani reads GW_ratio in main/initVerticalMod.F90
+    main/initVerticalMod.F90:170:    real(r8) ,pointer     :: GWratio (:)       ! FFelfelani Comment: read in - USGS GW ratio !Tanjila
+    main/initVerticalMod.F90:677:    allocate(GWratio(bounds%begg:bounds%endg))
+    main/initVerticalMod.F90:678:    call ncd_io(ncid=ncid, varname='USGS_mean', flag='read', data=GWratio, dim1name=grlnd, readvar=readvar)
+    main/initVerticalMod.F90:686:       grc%GW_ratio(g) = max(GWratio(g), 0.0_r8)
+    main/initVerticalMod.F90:693:       col%GW_ratio(c) = max(GWratio(g), 0.0_r8)
+    main/initVerticalMod.F90:695:    deallocate(GWratio)
+
+Need to define GW_ratio column level variable in ColumnType.F90 and grid level var in GridcellType.F90
+---------------------------------------------------------
+There is no changes in IrrigationMod.F90 between alpha-ctsm5.2.mksrf.23_ctsm5.1.dev171 and ctsm5.3.043
+===================================================
+2025/05/14
+===================================================
+How irrigation works:
+CalcIrrigationNeeded calculates irrigation deficit for next timestep.
+CalcIrrigationFluxes calculates irrigation withdrawal fluxes for the current timestep.
+CalcIrrigationFluxes:
+  1. Calculates bulk and tracer withdrawals
+  2. Calculates total groundwater unconfined aquifer irrigation.
+  3. Calculates application fluxes i.e., drip or sprinkler.
+
+clm_driver:
+  1. CalcAndWithdrawIrrigationFluxes - HydrologyNoDrainageMod
+      1.a. CalcIrrigationFluxes - IrrigationMod
+          - CalcBulkWithdrawals
+            - WrapCalcIrrigWithdrawals # Supply remaining deficit from groundwater
+              - CalcIrrigWithdrawals
+          - CalcOneTracerWithdrawals
+          - CalcTotalGWUnconIrrig
+          - CalcApplicationFLuxes
+      1.b. WithdrawGroundwaterIrrigation - HydrologyNoDrainageMod
+  2. CalcIrrigationNeeded - IrrigationMod
+---------------------------------------------------------
+I think sfc_irrig_rate_patch and irrig_rate_demand_patch are the two variables I can manipulate to implement 
+USGS GW irrigation ratios.
+sfc and gw irrigation are all set by sfc_irrig_rate_patch and irrig_rate_demand_patch,
+which are set by deficit_volr_limited and deficit respectively.
+See CalcIrrigationNeeded.
+
+QIR_sfc = sfc_irrig_rate_patch = deficit_volr_limited
+QIR_total = irrig_rate_demand_patch = deficit
+So,
+QIR_gw = deficit - deficit_volr_limited
+
+So, maybe I can look to only scale deficit_volr_limited.
+if (1-GW_ratio) * deficit > deficit_volr_limited:
+  deficit_volr_limited = deficit_volr_limited # Limit sfc irrigation to deficit_volr_limited
+elseif (1-GW_ratio) * deficit <= deficit_volr_limited:
+  deficit_volr_limited = (1-GW_ratio) * deficit # Limit deficit_volr_limited to USGS ratio
+endif
+
+So,
+gw irrigation should be scaled automatically.
+
+Changes made in CalcIrrigationNeeded.
+---------------------------------------------------------
+Total changes in 
+        modified:   IrrigationMod.F90
+        modified:   ../main/ColumnType.F90
+        modified:   ../main/GridcellType.F90
+        modified:   ../main/initVerticalMod.F90
+---------------------------------------------------------
+Need to add namelist var.
+Added use_USGS_irrig_ratio in namelist definition and default files.
+Added use_USGS_irrig_ratio in IrrigationMod.F90.
+Added consistency check in CalcIrrigationNeeded. TODO: shift namelist validity to CheckNamelistValidity
+---------------------------------------------------------
+Made a test case in /glade/work/amans/cases_GW/USGS_ratio_cases/test_001_IHistClm50BgcCrop_MRB_0.5_USGS_ratio
+cloned from /glade/work/amans/cases/test_008_IHistClm50BgcCrop_MRB_0.5_fixed_YiYao_paddy_1_scaled_v6
+
+Need to create surface/add USGS_mean dataset to surface
+From:
+/glade/work/amans/data_lat_GW/MRB_0.5/surfdata_0.5-global_hist_2000_78pfts_c240325_MRB_0.5_c241112.nc
+To (copy of /glade/work/amans/data/MRB-CONUS_0.5/merged_ctsm5.3_and_5.2_fsurf/surfdata_48x77-MRB_0.5_hist_1979_78pfts_c250423.nc)
+/glade/work/amans/data/MRB-CONUS_0.5/merged_ctsm5.3_and_5.2_fsurf/surfdata_48x77-MRB_0.5_hist_1979_78pfts_USGS_ratio_c250514.nc
+
+using
+ncks -A -v USGS_mean /glade/work/amans/data_lat_GW/MRB_0.5/surfdata_0.5-global_hist_2000_78pfts_c240325_MRB_0.5_c241112.nc /glade/work/amans/data/MRB-CONUS_0.5/merged_ctsm5.3_and_5.2_fsurf/surfdata_48x77-MRB_0.5_hist_1979_78pfts_USGS_ratio_c250514.nc
+---------------------------------------------------------
+Trying to build...
+./xmlchange SRCROOT=/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation
+
+Need to change SRCROOT in Lockedfiles env_case.xml manually to /glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation
+Starts building...error
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(454): error #5082: Syntax error, found END-OF-STATEMENT when expecting one of: ) ,
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(455): error #5276: Unbalanced parentheses
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(455): error #5082: Syntax error, found ')' when expecting one of: <END-OF-STATEMENT> ;
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(455): error #6410: This name has not been declared as an array or a function.   [USE_USGS_IRRIG_RATIO]
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1595): error #6404: This name does not have a type, and must have an explicit type.   [MASTERPROC]
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1595): error #6341: A logical data type is required in this context.   [MASTERPROC]
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1596): error #6404: This name does not have a type, and must have an explicit type.   [USE_GROUNDWATER_IRRIGATION]
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1596): error #6404: This name does not have a type, and must have an explicit type.   [USE_USGS_IRRIG_RATIO]
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1605): error #6341: A logical data type is required in this context.   [USE_USGS_IRRIG_RATIO]
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1616): error #6099: An ENDDO statement occurred without a corresponding DO or DO WHILE statement.
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1638): error #8146: An END ASSOCIATE occurred without a corresponding ASSOCIATE statement.
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1606): error #6321: An unterminated block exists.
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1605): error #6321: An unterminated block exists.
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1477): error #6321: An unterminated block exists.
+
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(1478): error #6596: If a deferred-shape array is intended, then the ALLOCATABLE or POINTER attribute is missing; if an assumed-shape array is intended, the array must be a dummy argument.   [GW_RATIO]
+
+Fixed the above errors. One remaining error
+/glade/u/home/amans/USGS_irrigation_clm/ctsm_USGS_irrigation/src/biogeophys/IrrigationMod.F90(458): error #5082: Syntax error, found IDENTIFIER 'USE_USGS_IRRIG_RATIO' when expecting one of: :: ) ( , : * <END-OF-STATEMENT> ; . % (/ + - [ ] /) . ** / // ...
+
+Build OK. Submit OK.
+Case run Error...
+===================================================
+2025/05/15
+===================================================
+ SetIrrigMethod invalid irrigation method specified
+iam = 0: local  gridcell index = 2
+iam = 0: global gridcell index = 1793
+iam = 0: gridcell longitude    =  255.7500000
+iam = 0: gridcell latitude     =   38.7500000
+ ENDRUN:
+ ERROR: bad irrig_method ERROR in IrrigationMod.F90 at line 775
+
+I forgot to remove Yi Yao's irrigation_method data from the surface. Removing that should solve this issue.
+Removing variable from ncfile using nco
+ncks -x -v irrigation_method surfdata_48x77-MRB_0.5_hist_1979_78pfts_YiYao_USGS_ratio_c250515.nc -o surfdata_48x77-MRB_0.5_hist_1979_78pfts_USGS_ratio_c250515.nc
+
+Running...OK.
+Code works!
+===================================================
+2025/05/16
+===================================================
+Created new dataset for USGS irrigation ratio from HUC based 2000-2020 irrigation dataset.
+Need to replace FFelfelani's USGS_mean with this dataset.
+
+===================================================
+2025/05/17
+===================================================
+Created new dataset from HUC-based USGS irrigation using HUC8.
+Created dataset for 0.5deg and 0.05deg.
+0.05deg dataset required dask manual chunking to work after number of retries in Derecho login node.
+2.5GB/13GB in 10mins. So expected time to completion is 10 * 13/2.5 = 52mins.
+It took 1h 12mins to complete with chunk({'lsmlat': 20, 'lsmlon': 20, 'cft': 10, 'lsmpft': 10})
