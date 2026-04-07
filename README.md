@@ -1,4 +1,5 @@
 # CTSM with USGS based Proportioning of Surface-Groundwater Irrigation
+[![DOI](https://zenodo.org/badge/987265957.svg)](https://doi.org/10.5281/zenodo.19461484)
 
 This project implements a USGS-based surface water to groundwater irrigation ratio into the Community Terrestrial Systems Model (CTSM), using gridded datasets derived from USGS HUC8-based irrigation data (2000–2020). The modification adjusts irrigation water sources in CLM5 according to observed ratios, providing a more realistic simulation of irrigation water use. It has been tested in the Mississippi River Basin with satisfactory results.
 
